@@ -29,12 +29,53 @@ from .uper_head import UPerHead
 from .maskclip_head import MaskClipHead
 from .maskclip_plus_head import MaskClipPlusHead
 from .aspp_headv2 import ASPPHeadV2
+from .atm_head import ATMHead
+from .atm_single_head import ATMSingleHead
+from .tpn_atm_head import TPNATMHead
+from .seg_head import SegHead
+from .seg_text_as_conditi_head import SegTextAsConditionHead
+from .seg_text_as_conditi_head_v1 import SegTextAsConditionHeadV1
+from .seg_text_as_conditi_head_v2 import SegTextAsConditionHeadV2
+from .seg_text_as_conditi_head_v3 import SegTextAsConditionHeadV3
 
 __all__ = [
-    'FCNHead', 'PSPHead', 'ASPPHead', 'PSAHead', 'NLHead', 'GCHead', 'CCHead',
-    'UPerHead', 'DepthwiseSeparableASPPHead', 'ANNHead', 'DAHead', 'OCRHead',
-    'EncHead', 'DepthwiseSeparableFCNHead', 'FPNHead', 'EMAHead', 'DNLHead',
-    'PointHead', 'APCHead', 'DMHead', 'LRASPPHead', 'SETRUPHead',
-    'SETRMLAHead', 'DPTHead', 'SETRMLAHead', 'SegformerHead', 'ISAHead',
-    'STDCHead', 'MaskClipHead', 'MaskClipPlusHead', 'ASPPHeadV2'
+    'FCNHead',
+    'PSPHead',
+    'ASPPHead',
+    'PSAHead',
+    'NLHead',
+    'GCHead',
+    'CCHead',
+    'UPerHead',
+    'DepthwiseSeparableASPPHead',
+    'ANNHead',
+    'DAHead',
+    'OCRHead',
+    'EncHead',
+    'DepthwiseSeparableFCNHead',
+    'FPNHead',
+    'EMAHead',
+    'DNLHead',
+    'PointHead',
+    'APCHead',
+    'DMHead',
+    'LRASPPHead',
+    'SETRUPHead',
+    'SETRMLAHead',
+    'DPTHead',
+    'SETRMLAHead',
+    'SegformerHead',
+    'ISAHead',
+    'STDCHead',
+    'MaskClipHead',
+    'MaskClipPlusHead',
+    'ASPPHeadV2',
+    'ATMHead',
+    'ATMSingleHead',
+    'TPNATMHead',
+    'SegHead',
+    'SegTextAsConditionHead',
+    'SegTextAsConditionHeadV1',
+    "SegTextAsConditionHeadV2",
+    "SegTextAsConditionHeadV3",
 ]

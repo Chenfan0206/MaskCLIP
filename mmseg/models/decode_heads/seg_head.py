@@ -5,12 +5,13 @@ import torch.nn.functional as F
 
 from mmcv.utils import print_log
 from mmseg.utils import get_root_logger
+from mmseg.ops import resize
 from ..builder import HEADS
 from .decode_head import BaseDecodeHead
 
 
 @HEADS.register_module()
-class MaskClipHead(BaseDecodeHead):
+class SegHead(BaseDecodeHead):
     def __init__(
         self,
         text_categories,
@@ -24,7 +25,7 @@ class MaskClipHead(BaseDecodeHead):
         num_heads=32,
         **kwargs,
     ):
-        super(MaskClipHead, self).__init__(**kwargs)
+        super(SegHead, self).__init__(**kwargs)
 
         self.text_categories = text_categories
         self.text_channels = text_channels
@@ -88,8 +89,9 @@ class MaskClipHead(BaseDecodeHead):
             logger=get_root_logger(),
         )
 
-    def forward(self, inputs):
-        x = self._transform_inputs(inputs)
+    def forward(self, batch):
+        inputs = batch['query_feat']
+        x = inputs[-1]
         q, k, v, cls_token = None, None, None, None
         if self.vit:
             if isinstance(x, list) and len(x) == 4:
@@ -144,7 +146,17 @@ class MaskClipHead(BaseDecodeHead):
         if not self.training:
             output = self.refine_output(output, k)
 
-        return output
+        # reshape output to image size
+        output = resize(
+            input=output,
+            size=batch['query_img'].shape[2:],
+            mode='bilinear',
+            align_corners=False,
+        )
+        _all = {
+            'pred_logits': output,
+        }
+        return _all
 
     def cls_seg(self, feat):
         feat = feat / feat.norm(dim=1, keepdim=True)

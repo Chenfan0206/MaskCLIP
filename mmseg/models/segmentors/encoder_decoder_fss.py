@@ -11,7 +11,7 @@ from .base import BaseSegmentor
 
 
 @SEGMENTORS.register_module()
-class EncoderDecoder(BaseSegmentor):
+class EncoderDecoderFSS(BaseSegmentor):
     """Encoder Decoder segmentors.
 
     EncoderDecoder typically consists of backbone, decode_head, auxiliary_head.
@@ -31,7 +31,7 @@ class EncoderDecoder(BaseSegmentor):
         init_cfg=None,
         feed_img_to_decode_head=False,
     ):
-        super(EncoderDecoder, self).__init__(init_cfg)
+        super(EncoderDecoderFSS, self).__init__(init_cfg)
         if pretrained is not None:
             assert (
                 backbone.get('pretrained') is None
@@ -49,6 +49,7 @@ class EncoderDecoder(BaseSegmentor):
 
         assert self.with_decode_head
 
+        
     def _init_decode_head(self, decode_head):
         """Initialize ``decode_head``"""
         self.decode_head = builder.build_head(decode_head)
@@ -85,6 +86,21 @@ class EncoderDecoder(BaseSegmentor):
         )
         return out
 
+    def encode_decode_fss(self, batch, img_metas=None):
+        """Encode images with backbone and decode into a semantic segmentation
+        map of the same size as input."""
+        # feat_s = self.extract_feat(batch['query_img'])
+        feat_q = self.extract_feat(batch['query_img'])
+        batch['feat_q'] = feat_q
+        out = self._decode_head_forward_test(batch, img_metas)
+        out = resize(
+            input=out['pred_masks'],
+            size=batch['query_img'].shape[2:],
+            mode='bilinear',
+            align_corners=self.align_corners,
+        )
+        return out
+
     def _decode_head_forward_train(self, x, img_metas, gt_semantic_seg, img=None):
         """Run forward function and calculate loss for decode head in
         training."""
@@ -100,6 +116,26 @@ class EncoderDecoder(BaseSegmentor):
 
         losses.update(add_prefix(loss_decode, 'decode'))
         return losses
+    
+    def _decode_head_forward_train_fss(self, batch):
+        """Run forward function and calculate loss for decode head in
+        training."""
+        losses = dict()
+
+
+        loss_decode,seg_logits = self.decode_head.forward_train(batch)
+
+        # losses.update(add_prefix(loss_decode, 'decode'))
+        # losses.update(add_prefix(seg_logits, 'seg_logits'))
+        losses.update({
+            "loss": loss_decode,
+            "pred_logits": seg_logits})
+            
+
+        return losses
+
+
+
 
     def _decode_head_forward_test(self, x, img_metas):
         """Run forward function and calculate loss for decode head in
@@ -165,6 +201,52 @@ class EncoderDecoder(BaseSegmentor):
             losses.update(loss_aux)
 
         return losses
+
+
+    def forward_train_fss(self, batch, img_metas, gt_semantic_seg):
+        """Forward function for training.
+
+        Args:
+            img (Tensor): Input images.
+            img_metas (list[dict]): List of image info dict where each dict
+                has: 'img_shape', 'scale_factor', 'flip', and may also contain
+                'filename', 'ori_shape', 'pad_shape', and 'img_norm_cfg'.
+                For details on the values of these keys see
+                `mmseg/datasets/pipelines/formatting.py:Collect`.
+            gt_semantic_seg (Tensor): Semantic segmentation masks
+                used if the architecture supports semantic segmentation task.
+
+        Returns:
+            dict[str, Tensor]: a dictionary of loss components
+        """
+
+        feat_q = self.extract_feat(batch['query_img'])
+        batch['feat_q'] = feat_q
+
+        # out = self._decode_head_forward_train(batch, img_metas)
+        # out = resize(
+        #     input=out['pred_masks'],
+        #     size=batch['query_img'].shape[2:],
+        #     mode='bilinear',
+        #     align_corners=self.align_corners,
+        # )
+        # return out
+
+        # x = self.extract_feat(img)
+
+        losses = dict()
+
+
+        loss_decode = self._decode_head_forward_train_fss(batch)
+        
+        losses.update(loss_decode)
+
+        if self.with_auxiliary_head:
+            loss_aux = self._auxiliary_head_forward_train(x, img_metas, gt_semantic_seg)
+            losses.update(loss_aux)
+
+        return losses
+
 
     # TODO refactor
     def slide_inference(self, img, img_meta, rescale):
@@ -309,3 +391,16 @@ class EncoderDecoder(BaseSegmentor):
         # unravel batch dim
         seg_pred = list(seg_pred)
         return seg_pred
+
+    def freeze_and_set_to_train_mode(self):
+        """Set the module to training mode."""
+        self.backbone.eval()
+        for p in self.backbone.parameters():
+            p.requires_grad = False
+        
+        for param in self.decode_head.proj.parameters():
+            param.requires_grad = False
+
+    
+
+    

@@ -14,7 +14,7 @@ from .night_driving import NightDrivingDataset
 from .pascal_context import PascalContextDataset, PascalContextDataset59
 from .potsdam import PotsdamDataset
 from .stare import STAREDataset
-from .voc import PascalVOCDataset,PascalVOCDataset20_png
+from .voc import PascalVOCDataset
 from .web_image import WebImageDataset
 from .maskclip_demo import MaskCLIPDemoDataset
 
@@ -44,5 +44,4 @@ __all__ = [
     'PotsdamDataset',
     'WebImageDataset',
     'MaskCLIPDemoDataset',
-    'PascalVOCDataset20_png'
 ]

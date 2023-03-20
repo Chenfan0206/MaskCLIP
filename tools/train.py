@@ -23,31 +23,31 @@ def parse_args():
     parser = argparse.ArgumentParser(description='Train a segmentor')
     parser.add_argument('config', help='train config file path')
     parser.add_argument('--work-dir', help='the dir to save logs and models')
-    parser.add_argument(
-        '--load-from', help='the checkpoint file to load weights from')
-    parser.add_argument(
-        '--resume-from', help='the checkpoint file to resume from')
+    parser.add_argument('--load-from', help='the checkpoint file to load weights from')
+    parser.add_argument('--resume-from', help='the checkpoint file to resume from')
     parser.add_argument(
         '--no-validate',
         action='store_true',
-        help='whether not to evaluate the checkpoint during training')
+        help='whether not to evaluate the checkpoint during training',
+    )
     group_gpus = parser.add_mutually_exclusive_group()
     group_gpus.add_argument(
         '--gpus',
         type=int,
-        help='number of gpus to use '
-        '(only applicable to non-distributed training)')
+        help='number of gpus to use ' '(only applicable to non-distributed training)',
+    )
     group_gpus.add_argument(
         '--gpu-ids',
         type=int,
         nargs='+',
-        help='ids of gpus to use '
-        '(only applicable to non-distributed training)')
+        help='ids of gpus to use ' '(only applicable to non-distributed training)',
+    )
     parser.add_argument('--seed', type=int, default=None, help='random seed')
     parser.add_argument(
         '--deterministic',
         action='store_true',
-        help='whether to set deterministic options for CUDNN backend.')
+        help='whether to set deterministic options for CUDNN backend.',
+    )
     parser.add_argument(
         '--options',
         nargs='+',
@@ -58,7 +58,8 @@ def parse_args():
         'into config file. If the value to be overwritten is a list, it '
         'should be like key="[a,b]" or key=a,b It also allows nested '
         'list/tuple values, e.g. key="[(a,b),(c,d)]" Note that the quotation '
-        'marks are necessary and that no white space is allowed.')
+        'marks are necessary and that no white space is allowed.',
+    )
     parser.add_argument(
         '--cfg-options',
         nargs='+',
@@ -68,17 +69,20 @@ def parse_args():
         'be overwritten is a list, it should be like key="[a,b]" or key=a,b '
         'It also allows nested list/tuple values, e.g. key="[(a,b),(c,d)]" '
         'Note that the quotation marks are necessary and that no white space '
-        'is allowed.')
+        'is allowed.',
+    )
     parser.add_argument(
         '--launcher',
         choices=['none', 'pytorch', 'slurm', 'mpi'],
         default='none',
-        help='job launcher')
+        help='job launcher',
+    )
     parser.add_argument('--local_rank', type=int, default=0)
     parser.add_argument(
         '--auto-resume',
         action='store_true',
-        help='resume from the latest checkpoint automatically.')
+        help='resume from the latest checkpoint automatically.',
+    )
     args = parser.parse_args()
     if 'LOCAL_RANK' not in os.environ:
         os.environ['LOCAL_RANK'] = str(args.local_rank)
@@ -87,10 +91,13 @@ def parse_args():
         raise ValueError(
             '--options and --cfg-options cannot be both '
             'specified, --options is deprecated in favor of --cfg-options. '
-            '--options will not be supported in version v0.22.0.')
+            '--options will not be supported in version v0.22.0.'
+        )
     if args.options:
-        warnings.warn('--options is deprecated in favor of --cfg-options. '
-                      '--options will not be supported in version v0.22.0.')
+        warnings.warn(
+            '--options is deprecated in favor of --cfg-options. '
+            '--options will not be supported in version v0.22.0.'
+        )
         args.cfg_options = args.options
 
     return args
@@ -112,8 +119,9 @@ def main():
         cfg.work_dir = args.work_dir
     elif cfg.get('work_dir', None) is None:
         # use config filename as default work_dir if cfg.work_dir is None
-        cfg.work_dir = osp.join('./work_dirs',
-                                osp.splitext(osp.basename(args.config))[0])
+        cfg.work_dir = osp.join(
+            './work_dirs', osp.splitext(osp.basename(args.config))[0]
+        )
     if args.load_from is not None:
         cfg.load_from = args.load_from
     if args.resume_from is not None:
@@ -150,8 +158,7 @@ def main():
     env_info_dict = collect_env()
     env_info = '\n'.join([f'{k}: {v}' for k, v in env_info_dict.items()])
     dash_line = '-' * 60 + '\n'
-    logger.info('Environment info:\n' + dash_line + env_info + '\n' +
-                dash_line)
+    logger.info('Environment info:\n' + dash_line + env_info + '\n' + dash_line)
     meta['env_info'] = env_info
 
     # log some basic info
@@ -160,17 +167,15 @@ def main():
 
     # set random seeds
     seed = init_random_seed(args.seed)
-    logger.info(f'Set random seed to {seed}, '
-                f'deterministic: {args.deterministic}')
+    logger.info(f'Set random seed to {seed}, ' f'deterministic: {args.deterministic}')
     set_random_seed(seed, deterministic=args.deterministic)
     cfg.seed = seed
     meta['seed'] = seed
     meta['exp_name'] = osp.basename(args.config)
 
     model = build_segmentor(
-        cfg.model,
-        train_cfg=cfg.get('train_cfg'),
-        test_cfg=cfg.get('test_cfg'))
+        cfg.model, train_cfg=cfg.get('train_cfg'), test_cfg=cfg.get('test_cfg')
+    )
     model.init_weights()
 
     # SyncBN is not support for DP
@@ -178,7 +183,8 @@ def main():
         warnings.warn(
             'SyncBN is only supported with DDP. To be compatible with DP, '
             'we convert SyncBN to BN. Please use dist_train.sh which can '
-            'avoid this error.')
+            'avoid this error.'
+        )
         model = revert_sync_batchnorm(model)
 
     logger.info(model)
@@ -195,7 +201,8 @@ def main():
             mmseg_version=f'{__version__}+{get_git_hash()[:7]}',
             config=cfg.pretty_text,
             CLASSES=datasets[0].CLASSES,
-            PALETTE=datasets[0].PALETTE)
+            PALETTE=datasets[0].PALETTE,
+        )
     # add an attribute for visualization convenience
     model.CLASSES = datasets[0].CLASSES
     # passing checkpoint meta for saving best checkpoint
@@ -207,7 +214,8 @@ def main():
         distributed=distributed,
         validate=(not args.no_validate),
         timestamp=timestamp,
-        meta=meta)
+        meta=meta,
+    )
 
 
 if __name__ == '__main__':
