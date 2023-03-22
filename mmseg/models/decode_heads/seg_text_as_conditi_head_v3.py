@@ -843,7 +843,7 @@ class SegTextAsConditionHeadV3(BaseDecodeHead):
                 elif isinstance(m, nn.LayerNorm):
                     nn.init.ones_(m.weight)
                     nn.init.zeros_(m.bias)
-        elif self.decode_mode == 'clip_context_affinity_v1':
+        elif self.decode_mode == 'clip_context_affinity_v1' or self.decode_mode == 'clip_context_affinity_v2' or self.decode_mode == 'clip_context_affinity_v3':
             in_channels = [256, 512, 1024, 2048]
             self.number_of_grids = [2304, 576, 144]
             self.pe = nn.ModuleList()
@@ -2270,6 +2270,432 @@ class SegTextAsConditionHeadV3(BaseDecodeHead):
                 'loss': loss,
             }
             return _all
+
+
+        if self.decode_mode == 'clip_context_affinity_v2':
+            ## using sigmoid 激活函数
+            ## 获得每一层的affinity的mask
+            all_affinity_masks = []
+            for _idx, A in enumerate(batch['affinity']):
+                if _idx == 0:
+                    continue
+                else:  # 去除affinity, resize mask
+                    A_ss, A_sq, A_qq = A
+                    _size = int(A_ss.size()[-1] ** 0.5)
+                    mask = einops.rearrange(
+                        F.interpolate(
+                            batch['support_masks'],
+                            size=(_size, _size),
+                            mode='bilinear',
+                            align_corners=True,
+                        ),  
+                        "n c h w -> n (h w) c",
+                    ).squeeze(-1)  # torch.Size([8, 2304])
+
+                stack_ids = [0, 1, 3, 4]
+
+                if _idx == 1:
+                    tmp = self.affinity_blocks[0](
+                        x=self.pe[0](A_ss),
+                        context=self.pe[0](A_sq),
+                    )
+                    tmp =  torch.einsum('ijk,ikl->ijl', tmp, A_qq) # torch.Size([8, 2304, 256])
+                    coarse_affinity_mask = torch.sigmoid(torch.einsum(
+                        'ij,ijk->ik', mask, tmp
+                    ).unsqueeze(1))
+                    _size = int(A_ss.size()[-1] ** 0.5)
+                    all_affinity_masks.append(einops.rearrange(coarse_affinity_mask, "n c (h w)-> n c h w", h=_size, w=_size))
+
+                    # coarse_mask = coarse_mask * context_weight + coarse_affinity_mask * (
+                    #     1 - context_weight
+                elif _idx == 2:
+                    tmp = self.affinity_blocks[1](
+                        x=self.pe[1](A_ss),
+                        context=self.pe[1](A_sq),
+                    )
+                    tmp = torch.einsum('ijk,ikl->ijl', tmp, A_qq) # torch.Size([8, 2304, 256])
+                    coarse_affinity_mask = torch.sigmoid(torch.einsum(
+                        'ij,ijk->ik', mask, tmp
+                    ).unsqueeze(1))
+                    # coarse_mask = coarse_mask * context_weight + coarse_affinity_mask * (
+                    #     1 - context_weight
+
+                    _size = int(A_ss.size()[-1] ** 0.5)
+                    all_affinity_masks.append(einops.rearrange(coarse_affinity_mask, "n c (h w)-> n c h w", h=_size, w=_size))
+
+                elif _idx == 3:
+                    tmp = self.affinity_blocks[2](
+                        x=self.pe[2](A_ss),
+                        context=self.pe[2](A_sq),
+                    )
+                    tmp = torch.einsum('ijk,ikl->ijl', tmp, A_qq)  # torch.Size([8, 2304, 256])
+                    coarse_affinity_mask = torch.sigmoid(torch.einsum(
+                        'ij,ijk->ik', mask, tmp
+                    ).unsqueeze(1))
+                    _size = int(A_ss.size()[-1] ** 0.5)
+                    all_affinity_masks.append(einops.rearrange(coarse_affinity_mask, "n c (h w)-> n c h w", h=_size, w=_size))
+
+            coarse_masks = []
+            for affinity_mask in all_affinity_masks:
+                coarse_mask_clip = F.interpolate(
+                input=batch['clip_probs'],
+                size=affinity_mask.shape[-2:],
+                mode='bilinear',
+                align_corners=True,
+            )
+                coarse_masks.append(torch.cat([coarse_mask_clip, affinity_mask], dim=1))
+            
+            coarse_masks.reverse()
+            coarse_masks1, coarse_masks2, coarse_masks3 = coarse_masks
+
+            coarse_masks1 = self.conv1(coarse_masks1 )  
+            coarse_masks2 = self.conv2( coarse_masks2)  
+            coarse_masks3 = self.conv3(coarse_masks3)  
+
+
+                        # multi-scale cascade (pixel-wise addition)
+            coarse_masks1 = F.interpolate(
+                coarse_masks1,
+                coarse_masks2.size()[-2:],
+                mode='bilinear',
+                align_corners=True,
+            )
+            mix = coarse_masks1 + coarse_masks2
+            mix = self.conv4(mix)  # torch.Size([20, 128, 24, 24])
+
+            mix = F.interpolate(
+                mix, coarse_masks3.size()[-2:], mode='bilinear', align_corners=True
+            )
+            mix = mix + coarse_masks3
+            mix = self.conv5(mix)  # torch.Size([20, 128, 48, 48])
+
+            # skip connect 1/8 and 1/4 features (concatenation)
+            nshot=1
+            if nshot == 1:
+                support_feat = batch['support_feat'][1]
+                 # torch.Size([20, 256, 48, 48])
+            else:
+                # support_feat = (
+                #     torch.stack(
+                #         [support_feats[k][self.stack_ids[1] - 1] for k in range(nshot)]
+                #     )
+                #     .max(dim=0)
+                #     .values
+                # )
+                pass
+            mix = torch.cat(
+                (mix, batch['query_feat'][1], support_feat), 1
+            )  # torch.Size([20, 640, 48, 48])
+
+            upsample_size = (mix.size(-1) * 2,) * 2
+            mix = F.interpolate(
+                mix, upsample_size, mode='bilinear', align_corners=True
+            )  # torch.Size([20, 640, 96, 96])
+            if nshot == 1:
+                support_feat =batch['support_feat'][0]
+            else:
+                pass
+                # support_feat = (
+                #     torch.stack(
+                #         [support_feats[k][self.stack_ids[0] - 1] for k in range(nshot)]
+                #     )
+                #     .max(dim=0)
+                #     .values
+                # )
+            mix = torch.cat(
+                (mix,   batch['query_feat'][0] , support_feat), 1
+            )  # torch.Size([8, 896, 96, 96])
+
+
+
+            mix = torch.cat(
+            (
+                mix,
+                F.interpolate(
+                    input=batch['clip_probs'],
+                    size=(mix.shape[-2], mix.shape[-1]),
+                    mode='bilinear',
+                    align_corners=True,
+                ),
+            ),
+            1,
+        )  # torch.Size([8, 1024, 96, 96])
+
+            out = self.mixer1(mix)  # torch.Size([8, 64, 96, 96])
+            upsample_size = (out.size(-1) * 2,) * 2
+            out = F.interpolate(out, upsample_size, mode='bilinear', align_corners=True)
+
+            out = torch.cat(
+                (
+                    out,
+                    F.interpolate(
+                        input=batch['clip_probs'],
+                        size=(out.shape[-2], out.shape[-1]),
+                        mode='bilinear',
+                        align_corners=True,
+                    ),
+                ),
+                1,
+            )  # torch.Size([8, 1024, 96, 96])
+            out = self.mixer2(out)  # torch.Size([8, 16, 384, 384])
+            upsample_size = (out.size(-1) * 2,) * 2
+            out = F.interpolate(
+                out, upsample_size, mode='bilinear', align_corners=True
+            )  # torch.Size([8, 16, 384, 384])
+
+            out = torch.cat(
+                (
+                    out,
+                    F.interpolate(
+                        input=batch['clip_probs'],
+                        size=(out.shape[-2], out.shape[-1]),
+                        mode='bilinear',
+                        align_corners=True,
+                    ),
+                ),
+                1,
+            )  # torch.Size([8, 1024, 96, 96])
+
+            logit_mask = self.mixer3(out)  # torch.Size([8, 2, 384, 384])
+            loss = torch.nn.CrossEntropyLoss(ignore_index=255)(
+                logit_mask, batch['query_mask'].long()
+            )
+            pred_mask_01 =  torch.argmax(logit_mask, dim=1)
+            _all = {
+                'pred_logits': logit_mask,
+                'pred_mask_01': pred_mask_01,
+                'loss': loss,
+            }
+            return _all
+
+
+        if self.decode_mode == 'clip_context_affinity_v3':
+            ## using sigmoid 激活函数
+            ## 获得每一层的affinity的mask
+            all_affinity_masks = []
+            for _idx, A in enumerate(batch['affinity']):
+                if _idx == 0:
+                    continue
+                else:  # 去除affinity, resize mask
+                    A_ss, A_sq, A_qq = A
+                    _size = int(A_ss.size()[-1] ** 0.5)
+                    mask = einops.rearrange(
+                        F.interpolate(
+                            batch['support_masks'],
+                            size=(_size, _size),
+                            mode='bilinear',
+                            align_corners=True,
+                        ),  
+                        "n c h w -> n (h w) c",
+                    ).squeeze(-1)  # torch.Size([8, 2304])
+
+                stack_ids = [0, 1, 3, 4]
+
+                if _idx == 1:
+                    tmp = self.affinity_blocks[0](
+                        x=self.pe[0](A_ss),
+                        context=self.pe[0](A_sq),
+                    )
+                    tmp =  torch.einsum('ijk,ikl->ijl', tmp, A_qq) # torch.Size([8, 2304, 256])
+                    coarse_affinity_mask = torch.sigmoid(torch.einsum(
+                        'ij,ijk->ik', mask, tmp
+                    ).unsqueeze(1))
+
+                    _min = coarse_affinity_mask.min(dim=-1, keepdim=True)[0]
+                    _max = coarse_affinity_mask.max(dim=-1, keepdim=True)[0]
+                    coarse_affinity_mask = (coarse_affinity_mask - _min) / (_max - _min + 1e-8)
+
+
+                    _size = int(A_ss.size()[-1] ** 0.5)
+                    all_affinity_masks.append(einops.rearrange(coarse_affinity_mask, "n c (h w)-> n c h w", h=_size, w=_size))
+
+                    # coarse_mask = coarse_mask * context_weight + coarse_affinity_mask * (
+                    #     1 - context_weight
+                elif _idx == 2:
+                    tmp = self.affinity_blocks[1](
+                        x=self.pe[1](A_ss),
+                        context=self.pe[1](A_sq),
+                    )
+                    tmp = torch.einsum('ijk,ikl->ijl', tmp, A_qq) # torch.Size([8, 2304, 256])
+                    coarse_affinity_mask = torch.sigmoid(torch.einsum(
+                        'ij,ijk->ik', mask, tmp
+                    ).unsqueeze(1))
+                    # coarse_mask = coarse_mask * context_weight + coarse_affinity_mask * (
+                    #     1 - context_weight
+
+                    _min = coarse_affinity_mask.min(dim=-1, keepdim=True)[0]
+                    _max = coarse_affinity_mask.max(dim=-1, keepdim=True)[0]
+                    coarse_affinity_mask = (coarse_affinity_mask - _min) / (_max - _min + 1e-8)
+
+
+                    _size = int(A_ss.size()[-1] ** 0.5)
+                    all_affinity_masks.append(einops.rearrange(coarse_affinity_mask, "n c (h w)-> n c h w", h=_size, w=_size))
+
+                elif _idx == 3:
+                    tmp = self.affinity_blocks[2](
+                        x=self.pe[2](A_ss),
+                        context=self.pe[2](A_sq),
+                    )
+                    tmp = torch.einsum('ijk,ikl->ijl', tmp, A_qq)  # torch.Size([8, 2304, 256])
+                    coarse_affinity_mask = torch.sigmoid(torch.einsum(
+                        'ij,ijk->ik', mask, tmp
+                    ).unsqueeze(1))
+
+
+                    _min = coarse_affinity_mask.min(dim=-1, keepdim=True)[0]
+                    _max = coarse_affinity_mask.max(dim=-1, keepdim=True)[0]
+                    coarse_affinity_mask = (coarse_affinity_mask - _min) / (_max - _min + 1e-8)
+
+
+                    _size = int(A_ss.size()[-1] ** 0.5)
+                    all_affinity_masks.append(einops.rearrange(coarse_affinity_mask, "n c (h w)-> n c h w", h=_size, w=_size))
+
+            coarse_masks = []
+            for affinity_mask in all_affinity_masks:
+                coarse_mask_clip = F.interpolate(
+                input=batch['clip_probs'],
+                size=affinity_mask.shape[-2:],
+                mode='bilinear',
+                align_corners=True,
+            )
+                coarse_masks.append(torch.cat([coarse_mask_clip, affinity_mask], dim=1))
+            
+            coarse_masks.reverse()
+            coarse_masks1, coarse_masks2, coarse_masks3 = coarse_masks
+
+            coarse_masks1 = self.conv1(coarse_masks1 )  
+            coarse_masks2 = self.conv2( coarse_masks2)  
+            coarse_masks3 = self.conv3(coarse_masks3)  
+
+
+                        # multi-scale cascade (pixel-wise addition)
+            coarse_masks1 = F.interpolate(
+                coarse_masks1,
+                coarse_masks2.size()[-2:],
+                mode='bilinear',
+                align_corners=True,
+            )
+            mix = coarse_masks1 + coarse_masks2
+            mix = self.conv4(mix)  # torch.Size([20, 128, 24, 24])
+
+            mix = F.interpolate(
+                mix, coarse_masks3.size()[-2:], mode='bilinear', align_corners=True
+            )
+            mix = mix + coarse_masks3
+            mix = self.conv5(mix)  # torch.Size([20, 128, 48, 48])
+
+            # skip connect 1/8 and 1/4 features (concatenation)
+            nshot=1
+            if nshot == 1:
+                support_feat = batch['support_feat'][1]
+                 # torch.Size([20, 256, 48, 48])
+            else:
+                # support_feat = (
+                #     torch.stack(
+                #         [support_feats[k][self.stack_ids[1] - 1] for k in range(nshot)]
+                #     )
+                #     .max(dim=0)
+                #     .values
+                # )
+                pass
+            mix = torch.cat(
+                (mix, batch['query_feat'][1], support_feat), 1
+            )  # torch.Size([20, 640, 48, 48])
+
+            upsample_size = (mix.size(-1) * 2,) * 2
+            mix = F.interpolate(
+                mix, upsample_size, mode='bilinear', align_corners=True
+            )  # torch.Size([20, 640, 96, 96])
+            if nshot == 1:
+                support_feat =batch['support_feat'][0]
+            else:
+                pass
+                # support_feat = (
+                #     torch.stack(
+                #         [support_feats[k][self.stack_ids[0] - 1] for k in range(nshot)]
+                #     )
+                #     .max(dim=0)
+                #     .values
+                # )
+            mix = torch.cat(
+                (mix,   batch['query_feat'][0] , support_feat), 1
+            )  # torch.Size([8, 896, 96, 96])
+
+
+
+            mix = torch.cat(
+            (
+                mix,
+                F.interpolate(
+                    input=batch['clip_probs'],
+                    size=(mix.shape[-2], mix.shape[-1]),
+                    mode='bilinear',
+                    align_corners=True,
+                ),
+            ),
+            1,
+        )  # torch.Size([8, 1024, 96, 96])
+
+            out = self.mixer1(mix)  # torch.Size([8, 64, 96, 96])
+            upsample_size = (out.size(-1) * 2,) * 2
+            out = F.interpolate(out, upsample_size, mode='bilinear', align_corners=True)
+
+            out = torch.cat(
+                (
+                    out,
+                    F.interpolate(
+                        input=batch['clip_probs'],
+                        size=(out.shape[-2], out.shape[-1]),
+                        mode='bilinear',
+                        align_corners=True,
+                    ),
+                ),
+                1,
+            )  # torch.Size([8, 1024, 96, 96])
+            out = self.mixer2(out)  # torch.Size([8, 16, 384, 384])
+            upsample_size = (out.size(-1) * 2,) * 2
+            out = F.interpolate(
+                out, upsample_size, mode='bilinear', align_corners=True
+            )  # torch.Size([8, 16, 384, 384])
+
+            out = torch.cat(
+                (
+                    out,
+                    F.interpolate(
+                        input=batch['clip_probs'],
+                        size=(out.shape[-2], out.shape[-1]),
+                        mode='bilinear',
+                        align_corners=True,
+                    ),
+                ),
+                1,
+            )  # torch.Size([8, 1024, 96, 96])
+
+            logit_mask = self.mixer3(out)  # torch.Size([8, 2, 384, 384])
+            loss = torch.nn.CrossEntropyLoss(ignore_index=255)(
+                logit_mask, batch['query_mask'].long()
+            )
+            pred_mask_01 =  torch.argmax(logit_mask, dim=1)
+            _all = {
+                'pred_logits': logit_mask,
+                'pred_mask_01': pred_mask_01,
+                'loss': loss,
+            }
+            return _all
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
     def cls_seg(self, feat):
         feat = feat / feat.norm(dim=1, keepdim=True)
