@@ -1001,7 +1001,103 @@ class SegTextAsConditionHeadV3(BaseDecodeHead):
                             nn.init.normal_(m.weight, 0, 0.01)
                             nn.init.constant_(m.bias, 0)
 
-                
+            if self.decode_mode == "clip_context_affinity_v6":
+                in_channels = [256, 512, 1024, 2048]
+                self.nlayers = [3, 4, 23, 3]
+                # self.lids = reduce(add, [[i + 1] * x for i, x in enumerate(nlayers)])
+                # self.stack_ids = torch.tensor(self.lids).bincount()[-4:].cumsum(dim=0)
+                self.combinations = ['clip', 'Aqq@clip', 'context',
+                                     'context+clip', 'Asq@Ms', "Asq@Ms+clip", "Asq@Ms*clip"]
+
+                outch1, outch2, outch3 = 16, 64, 128
+
+                ## conv1是最高层的
+                self.conv_stage4 = self.build_conv_block(
+                    len(self.combinations)*self.nlayers[-1],
+                    [outch1, outch2, outch3],
+                    [3, 3, 3],
+                    [1, 1, 1],
+                )  # 1/32
+                self.conv_stage3 = self.build_conv_block(
+                    len(self.combinations)*self.nlayers[-2],
+                    [outch1, outch2, outch3],
+                    [5, 3, 3],
+                    [1, 1, 1],
+                )  # 1/16
+                self.conv_stage2 = self.build_conv_block(
+                    len(self.combinations)*self.nlayers[-3],
+                    [outch1, outch2, outch3],
+                    [5, 5, 3],
+                    [1, 1, 1],
+                )  # 1/8
+                self.conv_stage1 = self.build_conv_block(
+                    len(self.combinations)*self.nlayers[-4],
+                    [outch1, outch2, outch3],
+                    [5, 5, 3],
+                    [1, 1, 1],
+                )  # 1/4
+
+
+                self.conv4_3 = self.build_conv_block(
+                    2*outch3, [outch3, outch3, outch3], [3, 3, 3], [1, 1, 1]
+                )  # 1/32 + 1/16
+                self.conv3_2 = self.build_conv_block(
+                    2*outch3, [outch3, outch3, outch3], [3, 3, 3], [1, 1, 1]
+                )  # 1/16 + 1/8
+                self.conv2_1 = self.build_conv_block(
+                    2*outch3, [outch3, outch3, outch3], [3, 3, 3], [1, 1, 1]
+                )  # 1/8 + 1/4
+
+
+                self.mixer1 = nn.Sequential(
+                    nn.Conv2d(
+                        outch3+1,
+                        outch3,
+                        (3, 3),
+                        padding=(1, 1),
+                        bias=True,
+                    ),
+                    nn.ReLU(),
+                    nn.Conv2d(outch3, outch2, (3, 3),
+                              padding=(1, 1), bias=True),
+                    nn.ReLU(),
+                )
+
+                self.mixer2 = nn.Sequential(
+                    nn.Conv2d(outch2 + 1, outch2, (3, 3),
+                              padding=(1, 1), bias=True),
+                    nn.ReLU(),
+                    nn.Conv2d(outch2, outch1, (3, 3),
+                              padding=(1, 1), bias=True),
+                    nn.ReLU(),
+                )
+
+                self.mixer3 = nn.Sequential(
+                    nn.Conv2d(outch1 + 1, outch1, (3, 3),
+                              padding=(1, 1), bias=True),
+                    nn.ReLU(),
+                    nn.Conv2d(outch1, 2, (3, 3), padding=(1, 1), bias=True),
+                )
+
+                ## the v5 contain self.conv_stage4, self.conv_stage3, self.conv_stage2, self.conv4_stage1, self.conv4_3, self.conv3_2, self.conv2_1, self.mixer1, self.mixer2, self.mixer3
+                need_init_modules = [self.conv_stage4, self.conv_stage3, self.conv_stage2, self.conv_stage1, self.conv4_3, self.conv3_2, self.conv2_1, self.mixer1, self.mixer2, self.mixer3]
+                for module in need_init_modules:
+                    for m in module.modules():
+                        if isinstance(m, nn.Conv2d):
+                            nn.init.kaiming_normal_(
+                                m.weight, mode='fan_out', nonlinearity='relu')
+                            if m.bias is not None:
+                                nn.init.constant_(m.bias, 0)
+                        elif isinstance(m, nn.BatchNorm2d):
+                            nn.init.constant_(m.weight, 1)
+                            nn.init.constant_(m.bias, 0)
+                        elif isinstance(m, nn.GroupNorm):
+                            nn.init.constant_(m.weight, 1)
+                            nn.init.constant_(m.bias, 0)
+                        elif isinstance(m, nn.Linear):
+                            nn.init.normal_(m.weight, 0, 0.01)
+                            nn.init.constant_(m.bias, 0)
+
 
 
             
@@ -3117,6 +3213,119 @@ class SegTextAsConditionHeadV3(BaseDecodeHead):
             return _all
 
 
+        if self.decode_mode == 'clip_context_affinity_v6':
+            ## 获得每一层的clip guided mask
+            coarse_masks = []
+            for context_prob, A in zip(batch['context_probs'], batch['affinity']):
+                coarse_masks.append(self.get_clip_guided_mask(infos=(batch['clip_probs'], context_prob.unsqueeze(
+                    1), A, batch['support_masks']), combinations=self.combinations))
+
+            coarse_masks4 = self.conv_stage4(einops.rearrange(
+                coarse_masks[-self.nlayers[-1]:], 'l b c h w -> b (l c) h w'))
+            coarse_masks3 = self.conv_stage3(einops.rearrange(
+                coarse_masks[-(self.nlayers[-1]+self.nlayers[-2]):-self.nlayers[-1]], 'l b c h w -> b (l c) h w'))
+            coarse_masks2 = self.conv_stage2(einops.rearrange(
+                coarse_masks[-(self.nlayers[-1]+self.nlayers[-2]+self.nlayers[-3]):-(self.nlayers[-1]+self.nlayers[-2])], 'l b c h w -> b (l c) h w'))
+            coarse_masks1 = self.conv_stage1(einops.rearrange(
+                coarse_masks[:self.nlayers[0]], 'l b c h w -> b (l c) h w'))
+
+
+            # multi-scale cascade (pixel-wise addition)
+            coarse_masks4 = F.interpolate(
+                coarse_masks4,
+                coarse_masks3.size()[-2:],
+                mode='bilinear',
+                align_corners=True,
+            )
+            mix = torch.cat((coarse_masks4, coarse_masks3), 1)
+            mix = self.conv4_3(mix)  # torch.Size([20, 128, 24, 24])
+
+            mix = F.interpolate(
+                mix, coarse_masks2.size()[-2:], mode='bilinear', align_corners=True
+            )
+            mix = torch.cat((mix, coarse_masks2), 1)
+            mix = self.conv3_2(mix)  # torch.Size([20, 128, 48, 48])
+
+            mix = F.interpolate(
+                mix, coarse_masks1.size()[-2:], mode='bilinear', align_corners=True
+            )
+            mix = torch.cat((mix, coarse_masks1), 1)
+            mix = self.conv2_1(mix)  # torch.Size([20, 128, 96, 96])
+
+            
+            out = torch.cat(
+                (
+                    mix,
+                    F.interpolate(
+                        input=batch['clip_probs'],
+                        size=(mix.shape[-2], mix.shape[-1]),
+                        mode='bilinear',
+                        align_corners=True,
+                    ),
+                ),
+                1,
+            )  
+            out = self.mixer1(out)  # torch.Size([8, 64, 96, 96])
+
+
+
+            out = torch.cat(
+                (
+                    out,
+                    F.interpolate(
+                        input=batch['clip_probs'],
+                        size=(mix.shape[-2], out.shape[-1]),
+                        mode='bilinear',
+                        align_corners=True,
+                    ),
+                ),
+                1,
+            )  
+            out = self.mixer2(out)  # torch.Size([8, 64, 96, 96])
+
+            out = torch.cat(
+                (
+                    out,
+                    F.interpolate(
+                        input=batch['clip_probs'],
+                        size=(mix.shape[-2], out.shape[-1]),
+                        mode='bilinear',
+                        align_corners=True,
+                    ),
+                ),
+                1,
+            )
+
+
+
+            logit_mask = self.mixer3(out)  # torch.Size([8, 2, 384, 384])
+            logit_mask = F.interpolate(
+                logit_mask,
+                batch['query_mask'].size()[-2:],
+                mode='bilinear',
+                align_corners=True,
+            )
+            loss = torch.nn.CrossEntropyLoss(ignore_index=255)(
+                logit_mask, batch['query_mask'].long()
+            )
+            pred_mask_01 = torch.argmax(logit_mask, dim=1)
+            _all = {
+                'pred_logits': logit_mask,
+                'pred_mask_01': pred_mask_01,
+                'loss': loss,
+            }
+            return _all
+
+
+
+
+
+
+
+
+
+
+
 
 
     def get_clip_guided_mask(self,infos,combinations=['clip']):
@@ -3128,8 +3337,6 @@ class SegTextAsConditionHeadV3(BaseDecodeHead):
         
         clip_prob, context_prob, A,Ms_gt = infos
         Ass, Asq, Aqq = A
-
-
 
         _size = context_prob.shape[-1]
         clip_prob = F.interpolate(clip_prob, size=(_size,_size) , mode='bilinear', align_corners=True)        
